@@ -44,6 +44,7 @@ from trl.core import LengthSampler
 from project_env import PROMPT_PATH
 from rewards.text_rewards import TextRewards
 
+from transformers import T5Tokenizer, T5ForConditionalGeneration
 
 
 def get_logger(name):
@@ -582,7 +583,26 @@ if __name__ == "__main__":
     output_max_length = script_args.output_max_length
     output_length_sampler = LengthSampler(output_min_length, output_max_length)
 
-    def score(prompts, model, tok, client, limiter, sample_num=6):
+
+    def random_noise(response, paraphrase_model, paraphrase_tok):
+        terminator = [paraphrase_tok.eos_token_id, paraphrase_tok.convert_tokens_to_ids("<|eot_id|>")]
+        for i in range(len(response)):
+            if not response[i]:
+                continue
+            input_ids = paraphrase_tok(response[i], return_tensors="pt").input_ids
+            output = paraphrase_model.generate(
+                input_ids=input_ids,
+                eos_token_id=terminator,
+                pad_token_id=paraphrase_tok.pad_token_id,
+                do_sample=True,
+                temperature=0.6,
+                top_p=0.9,
+            )
+            response[i] = paraphrase_tok.decode(output[0], skip_special_tokens=True)
+        return response
+
+
+    def score(prompts, model, tok, paraphrase_model, paraphrase_tok, client, limiter, sample_num=6, defender='toolname'):
         rewards = []
         messages = []
         # for system prompt
@@ -598,6 +618,9 @@ if __name__ == "__main__":
                     ]
                 )
         resps = run_victim_model(client, messages, model, tok, limiter)
+        if defender == 'toolname':
+            resps = random_noise(resps, paraphrase_model, paraphrase_tok)
+            print(resps)
         good_prompts = []
         good_rewards = []
         for i in range(len(prompts)):
@@ -686,6 +709,10 @@ if __name__ == "__main__":
 
         return [torch.FloatTensor([score]) for score in rewards]
 
+    paraphrase_model_name = "t5-small"
+    paraphrase_tokenizer = T5Tokenizer.from_pretrained(paraphrase_model_name)
+    paraphrase_model = T5ForConditionalGeneration.from_pretrained(paraphrase_model_name)
+
     exp_exp_stage = 0
     for epoch in tqdm(
         range(current_epoch, script_args.epochs),
@@ -733,9 +760,12 @@ if __name__ == "__main__":
                 batch["response"],
                 model=victim_model,
                 tok=victim_tokenizer,
+                paraphrase_model=paraphrase_model,
+                paraphrase_tok=paraphrase_tokenizer,
                 client=client,
                 sample_num=script_args.score_sample_num,
                 limiter=limiter,
+                defender='toolname'
             )
             accelerator.print("-------rewards calculated-------")
             # Run PPO step
@@ -760,3 +790,5 @@ if __name__ == "__main__":
                 os.path.join(script_args.output_dir, "good_prompts.csv"), index=False
             )
             accelerator.print("-------good prompts saved-------")
+            if len(global_good_prompts_dict) >= 10:
+                break
