@@ -44,7 +44,8 @@ from trl.core import LengthSampler
 from project_env import PROMPT_PATH
 from rewards.text_rewards import TextRewards
 
-from transformers import T5Tokenizer, T5ForConditionalGeneration
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+
 
 
 def get_logger(name):
@@ -585,20 +586,58 @@ if __name__ == "__main__":
 
 
     def random_noise(response, paraphrase_model, paraphrase_tok):
-        terminator = [paraphrase_tok.eos_token_id, paraphrase_tok.convert_tokens_to_ids("<|eot_id|>")]
-        for i in range(len(response)):
-            if not response[i]:
-                continue
-            input_ids = paraphrase_tok(response[i], return_tensors="pt").input_ids
-            output = paraphrase_model.generate(
-                input_ids=input_ids,
-                eos_token_id=terminator,
-                pad_token_id=paraphrase_tok.pad_token_id,
-                do_sample=True,
-                temperature=0.6,
-                top_p=0.9,
-            )
-            response[i] = paraphrase_tok.decode(output[0], skip_special_tokens=True)
+        valid_indices = []
+        input_texts = []
+        for i, text in enumerate(response):
+            if text:
+                valid_indices.append(i)
+                input_texts.append(f'paraphraser: {text}')
+
+        if not input_texts:
+            return response
+
+        inputs = paraphrase_tok(
+            input_texts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True
+        )
+        input_ids = inputs["input_ids"].to(paraphrase_model.device)
+        outputs = paraphrase_model.generate(
+            input_ids,
+            num_beams=4,
+            num_beam_groups=4,
+            num_return_sequences=1,
+            repetition_penalty=10.0,
+            diversity_penalty=3.0,
+            no_repeat_ngram_size=2,
+            temperature=0.8,
+            max_length=10000,
+        )
+        decoded_outputs = paraphrase_tok.batch_decode(outputs, skip_special_tokens=True)
+
+        for i, out in zip(valid_indices, decoded_outputs):
+            response[i] = out
+        # terminator = [paraphrase_tok.eos_token_id, paraphrase_tok.convert_tokens_to_ids("<|eot_id|>")]
+        # for i in range(len(response)):
+        #     if not response[i]:
+        #         continue
+        #     input_text = f'paraphraser: {response[i]}'
+        #     input_ids = paraphrase_tok(input_text, return_tensors="pt", padding="longest", truncation=True).input_ids.to(paraphrase_model.device)
+        #     output = paraphrase_model.generate(
+        #         input_ids,
+        #         num_beams=4,
+        #         num_beam_groups=4,
+        #         num_return_sequences=4,
+        #         repetition_penalty=10.0,
+        #         diversity_penalty=3.0,
+        #         no_repeat_ngram_size=2,
+        #         temperature=0.8,
+        #         max_length=10000,
+        #     )
+        #     response[i] = paraphrase_tok.decode(output[0], skip_special_tokens=True)
+            # print(input_text)
+            # print('ouput: ',response[i])
         return response
 
 
@@ -620,7 +659,6 @@ if __name__ == "__main__":
         resps = run_victim_model(client, messages, model, tok, limiter)
         if defender == 'toolname':
             resps = random_noise(resps, paraphrase_model, paraphrase_tok)
-            print(resps)
         good_prompts = []
         good_rewards = []
         for i in range(len(prompts)):
@@ -709,9 +747,9 @@ if __name__ == "__main__":
 
         return [torch.FloatTensor([score]) for score in rewards]
 
-    paraphrase_model_name = "t5-small"
-    paraphrase_tokenizer = T5Tokenizer.from_pretrained(paraphrase_model_name)
-    paraphrase_model = T5ForConditionalGeneration.from_pretrained(paraphrase_model_name)
+    paraphrase_model_name = "Ateeqq/Text-Rewriter-Paraphraser"
+    paraphrase_tokenizer = AutoTokenizer.from_pretrained(paraphrase_model_name)
+    paraphrase_model = AutoModelForSeq2SeqLM.from_pretrained(paraphrase_model_name, device_map={"": current_device})
 
     exp_exp_stage = 0
     for epoch in tqdm(
